@@ -1,0 +1,137 @@
+---
+title: "EAS 648 Lab1"
+author: "Zirui Peng"
+date: "2022-10-28"
+output: html_document
+---
+
+# Lab Setup
+```{r}
+#Set working directory
+setwd("F:/GOBLUE/22FALL/EAS648/lab1")
+
+#Load packages
+library(rio)
+library(tidyverse)
+library(sf)
+library(janitor)
+library(tmap)
+
+# if(!require(pacman))install.packages("pacman")
+# Install the latest version of the Epi R Handbook package to download related data
+# pacman::p_install_gh("appliedepi/epirhandbook")
+# pacman::p_load(epirhandbook)
+# download_book()
+```
+
+
+
+# Ebola Epidemic Data 
+```{r}
+# Download simulated Ebola epidemic dataframe (Only the first time knit needs to be run get_data)
+# get_data(file = "linelist_cleaned.rds") 
+linelist = import("linelist_cleaned.rds") 
+
+# Convert class dataframe to spatial feature 'sf'; 
+# Columns 'lon' and 'lat' have been designated as coordinate columns; 
+# 4326 identifies our coordinates as based on the World Geodetic System 1984 (WGS84) 
+linelist_sf <- linelist %>%
+     sf::st_as_sf(coords = c("lon", "lat"), crs = 4326) 
+head(linelist_sf)
+```
+
+# Admin Boundary Shapefiles
+```{r}
+# Download Sierra Leone Admin boundary shapefiles (Only the first time knit needs to be run get_data)
+# get_data(file = "sle_adm3.shp")
+sle_adm3_raw = st_read("sle_adm3.shp") # Import the shapefile
+
+sle_adm3 <- sle_adm3_raw %>%
+  clean_names() %>% # Clean the column names
+  filter(admin2name %in% c("Western Area Urban", "Western Area Rural")) # Filter rows to keep only areas of interest
+head(sle_adm3)
+
+```
+
+# Health Facilities
+```{r}
+# Download Sierra Leone Health facility data from OpenStreetMap (Only the first time knit needs to be run get_data)
+# get_data(file = "sle_hf.shp")
+sle_hf <- sf::read_sf("sle_hf.shp") %>% 
+  clean_names() %>%
+  filter(amenity %in% c("hospital", "clinic", "doctors")) #filter to keep only the points tagged as either “hospital”, “clinic”, or “doctors”.
+head(sle_hf)
+```
+
+
+
+# Plot Ebola Epidemic Point Distribution
+```{r}
+tmap_mode("plot") # set the tmap mode as static (“plot” mode)
+tm_shape(sle_adm3, bbox = c(-13.3, 8.445, -13.2, 8.5)) +    
+  tm_polygons(col = "#F7F7F7") +
+  tm_borders(col = "#000000", lwd = 2) +
+  tm_text("admin3name")+
+  tm_shape(linelist_sf) +
+  tm_dots(size=0.01, col='blue', alpha = 0.5) + 
+  tm_layout(title = "Distribution of Ebola cases")   
+```
+**Explain:**   
+Simple overlay of Ebola Epidemic Cases on top of Admin Boundary Shapefiles as a static image. It is not difficult to observe that there are multiple outbreak centers of Ebola Epidemic Cases in every administrative region.
+
+
+
+# Ebola Epidemic Cases by Administrative Unit
+```{r}
+linelist_adm <- linelist_sf %>% # join the administrative boundary file to the linelist, based on spatial intersection
+  sf::st_join(sle_adm3, join = st_intersects) %>% 
+  select(names(linelist_sf), admin3name, admin3pcod) # Keep the linelist_sf column names and two new admin ones of interest
+
+# Count cases by administrative unit
+case_adm3 <- linelist_adm %>%        
+  as_tibble() %>%                      # convert to tibble for better display
+  group_by(admin3pcod, admin3name) %>% # group by admin unit, both by name and pcode 
+  summarise(cases = n()) %>%           # summarize and count rows
+  arrange(desc(cases))                 # arrange in descending order
+head(case_adm3)
+
+# Create a bar plot of case counts by administrative unit
+ggplot( data = linelist_adm, mapping = aes(x = fct_rev(fct_infreq(admin3name))))+ # x-axis is admin units, ordered by reversed frequency
+  geom_bar()+ # create bars, height is number of rows
+  coord_flip()+ # flip X and Y axes
+  theme_classic()+ # simplify background
+  labs( x = "Admin level 3", y = "Number of cases", title = " Number of Ebola Epidemic Cases by Administrative Unit") # titles and labels
+
+```
+**Explain:**  
+The Ebola Epidemic cases data does not contain any information about the administrative units. So I use the st_intersects function to join the administrative boundary file to the Ebola Epidemic cases data.  
+In this way, the number of  Ebola Epidemic cases in the corresponding area can be counted according to the administrative unit, and then sorted by descending order, which area is most likely to be infected at a glance. In this data, the Mountain Rural region has the most Ebola Epidemic cases.
+
+
+
+# Finding the Nearest Health Facility or Catchment Area
+```{r}
+linelist_sf_hf <- linelist_sf %>%           
+  st_join(sle_hf, join = st_nearest_feature) %>%   # data from nearest clinic joined to case data 
+  select(case_id, osm_id, name, amenity) %>%       # keep columns of interest, including id, name, type, and geometry of healthcare facility
+  rename("nearest_clinic" = "name")                # re-name for clarity
+head(linelist_sf_hf)
+
+hf_catchment <- linelist_sf_hf %>%   
+  as.data.frame() %>%                          # convert from shapefile to dataframe
+  count(nearest_clinic, name = "case_n") %>%   # count rows by nearest_clinic,assign new counts column as "case_n"
+  arrange(desc(case_n))                        # arrange in descending order
+hf_catchment      
+
+# Plot the cases and clinic points 
+tmap_mode("view")   # set the tmap mode as interactive  
+tm_shape(linelist_sf_hf) +
+  tm_dots(size=0.01, col='nearest_clinic') +     # Ebola Epidemic cases colored by nearest clinic
+  tm_shape(sle_hf) +                            
+  tm_dots(size=0.1, col='black', alpha = 0.4) +  # plot clinic facilities in large black dots
+  tm_text("name") +                              # overlay with name of facility
+  tm_layout(title = "Ebola Epidemic Cases Colored by Nearest Clinic")
+```
+**Explain:**  
+Draw a dynamic map based on Leaflet, reflecting the clinic closest to each Ebola Epidemic Cases.  
+In order to distinguish the infected cases and the locations of medical institutions, the clinic distribution is represented by a black circle with a larger diameter, while the Ebola Epidemic cases are represented by a smaller colored circle, and the corresponding colors are assigned according to the results of the nearest neighbor analysis.
